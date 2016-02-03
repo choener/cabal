@@ -25,6 +25,8 @@ module Distribution.Package (
         -- * Package keys/installed package IDs (used for linker symbols)
         ComponentId(..),
         UnitId(..),
+        hashUnitId,
+        rawHashUnitId,
         mkUnitId,
         mkLegacyUnitId,
         unitIdComponentId,
@@ -33,6 +35,13 @@ module Distribution.Package (
 
         -- * Modules
         Module(..),
+        ModuleSubst,
+        modSubstToList,
+        mkModSubst,
+        dispModSubst,
+        dispModSubstEntry,
+        parseModSubst,
+        parseModSubstEntry,
 
         -- * ABI hash
         AbiHash(..),
@@ -62,8 +71,10 @@ import qualified Text.PrettyPrint as Disp
 import Distribution.Compat.ReadP
 import Distribution.Text
 import Distribution.ModuleName
+import Distribution.Utils.Base62
 
-import Text.PrettyPrint ((<+>), text)
+import Text.PrettyPrint ((<+>), text, hcat)
+import qualified Data.Map as Map
 
 -- | A package name.
 --
@@ -141,25 +152,40 @@ instance NFData PackageIdentifier where
 -- from the same package compiled with different dependencies.
 -- There are a few cases where Cabal needs to know about
 -- module identities, e.g., when writing out reexported modules in
--- the 'InstalledPackageInfo'.
-data Module =
-    Module { moduleUnitId :: UnitId,
-             moduleName :: ModuleName }
+-- the 'InstalledPackageInfo'.  For more details, see the
+-- Backpack specification at
+--  https://github.com/ezyang/ghc-proposals/blob/backpack/proposals/0000-backpack.rst
+--
+-- In GHC, this is just a 'Module' constructor for backwards
+-- compatibility reasons, but in Cabal we can do it properly.
+data Module
+    = Module UnitId ModuleName
+    | ModuleVar ModuleName
     deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
 
 instance Binary Module
 
 instance Text Module where
     disp (Module uid mod_name) =
-        disp uid <<>> Disp.text ":" <<>> disp mod_name
-    parse = do
-        uid <- parse
-        _ <- Parse.char ':'
-        mod_name <- parse
-        return (Module uid mod_name)
+        hcat [disp uid, Disp.text ":", disp mod_name]
+    disp (ModuleVar mod_name) =
+        hcat [Disp.char '<', disp mod_name, Disp.char '>']
+    parse = parseModuleVar <++ parseModule
+      where
+        parseModuleVar = do
+            _ <- Parse.char '<'
+            mod_name <- parse
+            _ <- Parse.char '>'
+            return (ModuleVar mod_name)
+        parseModule = do
+            uid <- parse
+            _ <- Parse.char ':'
+            mod_name <- parse
+            return (Module uid mod_name)
 
 instance NFData Module where
     rnf (Module uid mod_name) = rnf uid `seq` rnf mod_name
+    rnf (ModuleVar mod_name) = rnf mod_name
 
 -- | A 'ComponentId' uniquely identifies the transitive source
 -- code closure of a component.  For non-Backpack components, it also
@@ -185,12 +211,117 @@ instance NFData ComponentId where
 
 -- | Returns library name prefixed with HS, suitable for filenames
 getHSLibraryName :: UnitId -> String
-getHSLibraryName (SimpleUnitId (ComponentId s)) = "HS" ++ s
+getHSLibraryName (UnitIdVar _) = error "getHSLibraryName: unbound variable"
+getHSLibraryName uid = "HS" ++ hashUnitId uid
 
--- | For now, there is no distinction between component IDs
--- and unit IDs in Cabal.
-newtype UnitId = SimpleUnitId ComponentId
-    deriving (Generic, Read, Show, Eq, Ord, Typeable, Data, Binary, Text, NFData)
+-- | An explicit substitution on modules.
+--
+-- NB: These substitutions are NOT idempotent, for example, a
+-- valid substitution is (A -> B, B -> A).
+type ModuleSubst = Map ModuleName Module
+
+-- | Create a module substitution from a list.
+mkModSubst :: [(ModuleName, Module)] -> ModuleSubst
+mkModSubst = Map.fromList
+
+-- | Convert a module substitution into a (ascending sorted) list.
+modSubstToList :: ModuleSubst -> [(ModuleName, Module)]
+modSubstToList = Map.toAscList
+
+-- | Pretty-print the entries of a module substitution, suitable
+-- for embedding into a 'UnitId' or passing to GHC via @--instantiate-with@.
+dispModSubst :: ModuleSubst -> Disp.Doc
+dispModSubst subst
+    = Disp.hcat
+    . Disp.punctuate Disp.comma
+    $ map dispModSubstEntry (Map.toAscList subst)
+
+-- | Pretty-print a single entry of a module substitution.
+dispModSubstEntry :: (ModuleName, Module) -> Disp.Doc
+dispModSubstEntry (k, v) = disp k <<>> Disp.char '=' <<>> disp v
+
+-- | Inverse to 'dispModSubst'.
+parseModSubst :: ReadP r ModuleSubst
+parseModSubst = fmap mkModSubst
+      . flip Parse.sepBy (Parse.char ',')
+      $ parseModSubstEntry
+
+-- | Inverse to 'dispModSubstEntry'.
+parseModSubstEntry :: ReadP r (ModuleName, Module)
+parseModSubstEntry =
+    do k <- parse
+       _ <- Parse.char '='
+       v <- parse
+       return (k, v)
+
+-- | A unit identifier uniquely identifies a library (e.g.,
+-- a package) in GHC.  In the absence of Backpack, unit identifiers
+-- are just strings ('SimpleUnitId'); however, if a library is
+-- parametrized over some signatures, these identifiers need
+-- more structure.  For more details, see:
+--  https://github.com/ezyang/ghc-proposals/blob/backpack/proposals/0000-backpack.rst
+data UnitId = SimpleUnitId ComponentId
+            -- ^ Equivalent to @'UnitId' cid Map.empty@
+            | HashedUnitId ComponentId String
+            -- ^ A unit identifier where the substitution is hashed
+            | UnitId ComponentId ModuleSubst
+            | UnitIdVar !Int -- de Bruijn indexed
+    deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
+
+-- | Hash a unit identifier into a string suitable for use
+-- on a file system.
+--
+-- This function is not in "Distribution.Backpack" because we need it
+-- for 'getHSLibraryName' which has traditionally lived
+-- in "Distribution.Package". TODO: this is pretty inefficient!
+hashUnitId :: UnitId -> String
+hashUnitId (SimpleUnitId cid) = display cid
+hashUnitId (HashedUnitId cid hash) = display cid ++ "+" ++ hash
+hashUnitId (UnitIdVar i)      = show i -- this is never bare
+hashUnitId (UnitId cid subst)
+  -- A fully indefinite package with no instantiations simply
+  -- has its 'ComponentId' as the hashed 'UnitId'.
+  | all (\(k, v) -> v == ModuleVar k) (modSubstToList subst)
+     = display cid
+  | otherwise
+     = hashUnitId (HashedUnitId cid (rawHashUnitId subst))
+
+-- | Hash ONLY the 'ModuleSubst' of a 'UnitId'; useful if you need
+-- to create separate subdirectories for different instantiations
+-- for a particular component id (e.g., if you are building inplace.)
+rawHashUnitId :: ModuleSubst -> String
+rawHashUnitId subst =
+    hashToBase62 $
+        concat [ display mod_name ++ "=" ++ hashUnitId uid ++ ":" ++ display m  ++ "\n"
+               | (mod_name, Module uid m) <- modSubstToList subst]
+
+instance Binary UnitId
+
+instance NFData UnitId where
+    rnf (SimpleUnitId cid) = rnf cid
+    rnf (HashedUnitId cid hash) = rnf cid `seq` rnf hash
+    rnf (UnitId cid insts) = rnf cid `seq` rnf insts
+    rnf (UnitIdVar i) = rnf i
+
+instance Text UnitId where
+    disp (SimpleUnitId cid) = disp cid
+    disp (UnitIdVar i) = Disp.char '?' <<>> Disp.int i
+    disp (HashedUnitId cid hash) = disp cid <<>> Disp.char '+' <<>> Disp.text hash
+    disp (UnitId cid insts) = disp cid <<>> Disp.brackets (dispModSubst insts)
+
+    parse = parseUnitIdVar <++ parseUnitId <++ parseHashedUnitId <++ parseSimpleUnitId
+      where
+        parseUnitIdVar = do _ <- Parse.char '?'
+                            fmap UnitIdVar (readS_to_P reads)
+        parseUnitId = do cid <- parse
+                         insts <- Parse.between (Parse.char '[') (Parse.char ']')
+                                    parseModSubst
+                         return (UnitId cid insts)
+        parseHashedUnitId = do cid <- parse
+                               _ <- Parse.char '+'
+                               hash <- Parse.munch1 isAlphaNum
+                               return (HashedUnitId cid hash)
+        parseSimpleUnitId = fmap SimpleUnitId parse
 
 -- | Makes a simple-style UnitId from a string.
 mkUnitId :: String -> UnitId
@@ -203,6 +334,9 @@ mkLegacyUnitId = SimpleUnitId . ComponentId . display
 -- | Extract 'ComponentId' from 'UnitId'.
 unitIdComponentId :: UnitId -> ComponentId
 unitIdComponentId (SimpleUnitId cid) = cid
+unitIdComponentId (UnitId cid _) = cid
+unitIdComponentId (HashedUnitId cid _) = cid
+unitIdComponentId (UnitIdVar _) = error "unitIdComponentId: top-level UnitIdVar"
 
 -- ------------------------------------------------------------
 -- * Package source dependencies

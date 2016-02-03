@@ -113,11 +113,13 @@ import Prelude ()
 import Distribution.Compat.Prelude hiding (lookup)
 
 import Distribution.Package
+import Distribution.Backpack
 import Distribution.ModuleName
 import qualified Distribution.InstalledPackageInfo as IPI
 import Distribution.Version
 import Distribution.Simple.Utils
 
+import qualified Control.Applicative as A
 import Control.Exception (assert)
 import Data.Array ((!))
 import qualified Data.Array as Array
@@ -137,6 +139,11 @@ data PackageIndex a = PackageIndex {
   -- by its UnitId.
   --
   unitIdIndex :: !(Map UnitId a),
+
+  -- An auxiliary index mapping component ids to indefinite packages.  This
+  -- is useful when you've been given a component id, but you don't know
+  -- what its holes are.
+  componentIdIndex :: !(Map ComponentId a),
 
   -- This auxiliary index maps package names (case-sensitively) to all the
   -- versions and instances of that package. This allows us to find all
@@ -160,7 +167,7 @@ instance Binary a => Binary (PackageIndex a)
 type InstalledPackageIndex = PackageIndex IPI.InstalledPackageInfo
 
 instance HasUnitId a => Monoid (PackageIndex a) where
-  mempty  = PackageIndex Map.empty Map.empty
+  mempty  = PackageIndex Map.empty Map.empty Map.empty
   mappend = (<>)
   --save one mappend with empty in the common case:
   mconcat [] = mempty
@@ -170,7 +177,7 @@ instance HasUnitId a => Semigroup (PackageIndex a) where
   (<>) = merge
 
 invariant :: HasUnitId a => PackageIndex a -> Bool
-invariant (PackageIndex pids pnames) =
+invariant (PackageIndex pids _cids pnames) =
      map installedUnitId (Map.elems pids)
   == sort
      [ assert pinstOk (installedUnitId pinst)
@@ -192,10 +199,11 @@ invariant (PackageIndex pids pnames) =
 
 mkPackageIndex :: HasUnitId a
                => Map UnitId a
+               -> Map ComponentId a
                -> Map PackageName (Map Version [a])
                -> PackageIndex a
-mkPackageIndex pids pnames = assert (invariant index) index
-  where index = PackageIndex pids pnames
+mkPackageIndex pids cids pnames = assert (invariant index) index
+  where index = PackageIndex pids cids pnames
 
 
 --
@@ -208,9 +216,13 @@ mkPackageIndex pids pnames = assert (invariant index) index
 -- ones.
 --
 fromList :: HasUnitId a => [a] -> PackageIndex a
-fromList pkgs = mkPackageIndex pids pnames
+fromList pkgs = mkPackageIndex pids cids pnames
   where
     pids      = Map.fromList [ (installedUnitId pkg, pkg) | pkg <- pkgs ]
+    cids      = Map.fromList [ (unitIdComponentId uid, pkg)
+                             | pkg <- pkgs
+                             , let uid = installedUnitId pkg
+                             , not (unitIdIsDefinite uid) ]
     pnames    =
       Map.fromList
         [ (packageName (head pkgsN), pvers)
@@ -241,8 +253,9 @@ fromList pkgs = mkPackageIndex pids pnames
 --
 merge :: HasUnitId a => PackageIndex a -> PackageIndex a
       -> PackageIndex a
-merge (PackageIndex pids1 pnames1) (PackageIndex pids2 pnames2) =
+merge (PackageIndex pids1 cids1 pnames1) (PackageIndex pids2 cids2 pnames2) =
   mkPackageIndex (Map.unionWith (\_ y -> y) pids1 pids2)
+                 (Map.unionWith (\_ y -> y) cids1 cids2)
                  (Map.unionWith (Map.unionWith mergeBuckets) pnames1 pnames2)
   where
     -- Packages in the second list mask those in the first, however preferred
@@ -257,11 +270,14 @@ merge (PackageIndex pids1 pnames1) (PackageIndex pids2 pnames2) =
 -- 'merge' with a singleton index.
 --
 insert :: HasUnitId a => a -> PackageIndex a -> PackageIndex a
-insert pkg (PackageIndex pids pnames) =
-    mkPackageIndex pids' pnames'
+insert pkg (PackageIndex pids cids pnames) =
+    mkPackageIndex pids' cids' pnames'
 
   where
-    pids'   = Map.insert (installedUnitId pkg) pkg pids
+    uid     = installedUnitId pkg
+    pids'   = Map.insert uid pkg pids
+    cids'   | unitIdIsDefinite uid = cids
+            | otherwise = Map.insert (unitIdComponentId uid) pkg cids
     pnames' = insertPackageName pnames
     insertPackageName =
       Map.insertWith' (\_ -> insertPackageVersion)
@@ -281,13 +297,17 @@ insert pkg (PackageIndex pids pnames) =
 deleteUnitId :: HasUnitId a
              => UnitId -> PackageIndex a
              -> PackageIndex a
-deleteUnitId ipkgid original@(PackageIndex pids pnames) =
+deleteUnitId ipkgid original@(PackageIndex pids cids pnames) =
   case Map.updateLookupWithKey (\_ _ -> Nothing) ipkgid pids of
     (Nothing,     _)     -> original
     (Just spkgid, pids') -> mkPackageIndex pids'
+                                           cids'
                                           (deletePkgName spkgid pnames)
 
   where
+    cids' | unitIdIsDefinite ipkgid = cids
+          | otherwise = Map.delete (unitIdComponentId ipkgid) cids
+
     deletePkgName spkgid =
       Map.update (deletePkgVersion spkgid) (packageName spkgid)
 
@@ -310,13 +330,15 @@ deleteInstalledPackageId = deleteUnitId
 --
 deleteSourcePackageId :: HasUnitId a => PackageId -> PackageIndex a
                       -> PackageIndex a
-deleteSourcePackageId pkgid original@(PackageIndex pids pnames) =
+deleteSourcePackageId pkgid original@(PackageIndex pids cids pnames) =
   case Map.lookup (packageName pkgid) pnames of
     Nothing     -> original
     Just pvers  -> case Map.lookup (packageVersion pkgid) pvers of
       Nothing   -> original
       Just pkgs -> mkPackageIndex
                      (foldl' (flip (Map.delete . installedUnitId)) pids pkgs)
+                     (foldl' (flip (Map.delete . unitIdComponentId
+                                               . installedUnitId)) cids pkgs)
                      (deletePkgName pnames)
   where
     deletePkgName =
@@ -331,11 +353,13 @@ deleteSourcePackageId pkgid original@(PackageIndex pids pnames) =
 --
 deletePackageName :: HasUnitId a => PackageName -> PackageIndex a
                   -> PackageIndex a
-deletePackageName name original@(PackageIndex pids pnames) =
+deletePackageName name original@(PackageIndex pids cids pnames) =
   case Map.lookup name pnames of
     Nothing     -> original
     Just pvers  -> mkPackageIndex
                      (foldl' (flip (Map.delete . installedUnitId)) pids
+                             (concat (Map.elems pvers)))
+                     (foldl' (flip (Map.delete . unitIdComponentId . installedUnitId)) cids
                              (concat (Map.elems pvers)))
                      (Map.delete name pnames)
 
@@ -394,7 +418,9 @@ lookupUnitId index uid = Map.lookup uid (unitIdIndex index)
 --
 lookupComponentId :: PackageIndex a -> ComponentId
                   -> Maybe a
-lookupComponentId index uid = Map.lookup (SimpleUnitId uid) (unitIdIndex index)
+lookupComponentId index cid =
+    Map.lookup (SimpleUnitId cid) (unitIdIndex index) A.<|>
+    Map.lookup cid (componentIdIndex index)
 
 -- | Backwards compatibility for Cabal pre-1.24.
 {-# DEPRECATED lookupInstalledPackageId "Use lookupUnitId instead" #-}
@@ -665,6 +691,7 @@ moduleNameIndex index =
     IPI.ExposedModule m reexport <- IPI.exposedModules pkg
     case reexport of
         Nothing -> return (m, [pkg])
+        Just (ModuleVar _) -> []
         Just (Module _ m') | m == m'   -> []
                            | otherwise -> return (m', [pkg])
         -- The heuristic is this: we want to prefer the original package

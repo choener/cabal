@@ -19,6 +19,7 @@ module Distribution.Solver.Modular.Package
 import Data.List as L
 
 import Distribution.Package -- from Cabal
+import Distribution.Text (display)
 
 import Distribution.Solver.Modular.Version
 import Distribution.Solver.Types.PackagePath
@@ -54,13 +55,12 @@ data I = I Ver Loc
 -- | String representation of an instance.
 showI :: I -> String
 showI (I v InRepo)   = showVer v
-showI (I v (Inst uid)) = showVer v ++ "/installed" ++ shortId uid
+showI (I v (Inst uid)) = showVer v ++ "/installed" ++ shortId
   where
     -- A hack to extract the beginning of the package ABI hash
-    shortId (SimpleUnitId (ComponentId i))
-            = snip (splitAt 4) (++ "...")
+    shortId = snip (splitAt 4) (++ "...")
             . snip ((\ (x, y) -> (reverse x, y)) . break (=='-') . reverse) ('-':)
-            $ i
+            $ display uid
     snip p f xs = case p xs of
                     (ys, zs) -> (if L.null zs then id else f) ys
 

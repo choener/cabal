@@ -241,15 +241,15 @@ checkLibrary pkg lib =
                             Just n -> n
                             ) ++ "does not expose any modules"
 
-    -- check use of required-signatures/exposed-signatures sections
-  , checkVersion [1,21] (not (null (requiredSignatures lib))) $
+    -- check use of signatures sections
+  , checkVersion [1,25] (not (null (signatures lib))) $
       PackageDistInexcusable $
-           "To use the 'required-signatures' field the package needs to specify "
-        ++ "at least 'cabal-version: >= 1.21'."
+           "To use the 'signatures' field the package needs to specify "
+        ++ "at least 'cabal-version: >= 1.25'."
 
     -- check that all autogen-modules appear on other-modules or exposed-modules
   , check
-      (not $ and $ map (flip elem (libModules lib)) (libModulesAutogen lib)) $
+      (not $ and $ map (flip elem (explicitLibModules lib)) (libModulesAutogen lib)) $
       PackageBuildImpossible $
            "An 'autogen-module' is neither on 'exposed-modules' or "
         ++ "'other-modules'."
@@ -1007,13 +1007,10 @@ checkCabalVersion pkg =
         ++ "at least 'cabal-version: >= 1.21'."
 
     -- check use of thinning and renaming
-  , checkVersion [1,21] (not (null depsUsingThinningRenamingSyntax)) $
+  , checkVersion [1,25] usesBackpackIncludes $
       PackageDistInexcusable $
-           "The package uses "
-        ++ "thinning and renaming in the 'build-depends' field: "
-        ++ commaSep (map display depsUsingThinningRenamingSyntax)
-        ++ ". To use this new syntax, the package needs to specify at least"
-        ++ "'cabal-version: >= 1.21'."
+           "To use the 'backpack-includes' field the package needs to specify "
+        ++ "at least 'cabal-version: >= 1.25'."
 
     -- check use of 'extra-framework-dirs' field
   , checkVersion [1,23] (any (not . null) (buildInfoField extraFrameworkDirs)) $
@@ -1242,13 +1239,7 @@ checkCabalVersion pkg =
     depsUsingMajorBoundSyntax = [ dep | dep@(Dependency _ vr) <- buildDepends pkg
                                   , usesMajorBoundSyntax vr ]
 
-    -- TODO: If the user writes build-depends: foo with (), this is
-    -- indistinguishable from build-depends: foo, so there won't be an
-    -- error even though there should be
-    depsUsingThinningRenamingSyntax =
-      [ name
-      | bi <- allBuildInfo pkg
-      , (name, _) <- Map.toList (targetBuildRenaming bi) ]
+    usesBackpackIncludes = any (not . null . backpackIncludes) (allBuildInfo pkg)
 
     testedWithUsingWildcardSyntax =
       [ Dependency (mkPackageName (display compiler)) vr
@@ -1344,7 +1335,7 @@ checkCabalVersion pkg =
     allModuleNames =
          (case library pkg of
            Nothing -> []
-           (Just lib) -> libModules lib
+           (Just lib) -> explicitLibModules lib
          )
       ++ concatMap otherModules (allBuildInfo pkg)
 

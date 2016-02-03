@@ -58,6 +58,8 @@ import Distribution.Utils.NubList ( toNubListR )
 import Distribution.Verbosity
 import Distribution.Compat.Stack
 import Language.Haskell.Extension
+import Distribution.Backpack (unitIdFreeHoles)
+import qualified Data.Set as Set
 
 import qualified Data.Map as Map
 import System.Directory         ( getDirectoryContents, getTemporaryDirectory )
@@ -287,6 +289,11 @@ componentGhcOptions verbosity lbi bi clbi odir =
         LibComponentLocalBuildInfo { componentCompatPackageKey = pk }
           -> toFlag pk
         _ -> mempty,
+      ghcOptInstantiatedWith = case clbi of
+        LibComponentLocalBuildInfo { componentInstantiatedWith = insts }
+          -> insts
+        _ -> [],
+      ghcOptNoCode          = toFlag $ not (Set.null (unitIdFreeHoles (componentUnitId clbi))),
       ghcOptPackageDBs      = withPackageDB lbi,
       ghcOptPackages        = toNubListR $ mkGhcOptPackages clbi,
       ghcOptSplitObjs       = toFlag (splitObjs lbi),
@@ -356,8 +363,9 @@ ghcLookupProperty prop comp =
 -- when using -split-objs, we need to search for object files in the
 -- Module_split directory for each module.
 getHaskellObjects :: GhcImplInfo -> Library -> LocalBuildInfo
+                  -> ComponentLocalBuildInfo
                   -> FilePath -> String -> Bool -> NoCallStackIO [FilePath]
-getHaskellObjects _implInfo lib lbi pref wanted_obj_ext allow_split_objs
+getHaskellObjects _implInfo lib lbi clbi pref wanted_obj_ext allow_split_objs
   | splitObjs lbi && allow_split_objs = do
         let splitSuffix = "_" ++ wanted_obj_ext ++ "_split"
             dirs = [ pref </> (ModuleName.toFilePath x ++ splitSuffix)
@@ -371,8 +379,6 @@ getHaskellObjects _implInfo lib lbi pref wanted_obj_ext allow_split_objs
   | otherwise  =
         return [ pref </> ModuleName.toFilePath x <.> wanted_obj_ext
                | x <- allLibModules lib clbi ]
- where
-  clbi = getComponentLocalBuildInfo lbi (CLibName (libName lib))
 
 mkGhcOptPackages :: ComponentLocalBuildInfo
                  -> [(UnitId, ModuleRenaming)]

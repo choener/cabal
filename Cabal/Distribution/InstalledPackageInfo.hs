@@ -55,6 +55,8 @@ import qualified Distribution.Compat.ReadP as Parse
 import Distribution.Compat.Graph
 
 import Text.PrettyPrint as Disp
+import qualified Data.Char as Char
+import qualified Data.Map as Map
 
 -- -----------------------------------------------------------------------------
 -- The InstalledPackageInfo type
@@ -66,6 +68,7 @@ data InstalledPackageInfo
         -- these parts are exactly the same as PackageDescription
         sourcePackageId   :: PackageId,
         installedUnitId   :: UnitId,
+        instantiatedWith  :: [(ModuleName, Module)],
         compatPackageKey  :: String,
         license           :: License,
         copyright         :: String,
@@ -103,8 +106,7 @@ data InstalledPackageInfo
     deriving (Eq, Generic, Read, Show)
 
 installedComponentId :: InstalledPackageInfo -> ComponentId
-installedComponentId ipi = case installedUnitId ipi of
-                            SimpleUnitId cid -> cid
+installedComponentId ipi = unitIdComponentId (installedUnitId ipi)
 
 {-# DEPRECATED installedPackageId "Use installedUnitId instead" #-}
 -- | Backwards compatibility with Cabal pre-1.24.
@@ -135,6 +137,7 @@ emptyInstalledPackageInfo
    = InstalledPackageInfo {
         sourcePackageId   = PackageIdentifier (mkPackageName "") (Version [] []),
         installedUnitId   = mkUnitId "",
+        instantiatedWith  = [],
         compatPackageKey  = "",
         license           = UnspecifiedLicense,
         copyright         = "",
@@ -233,6 +236,13 @@ showInstalledPackageInfoField = showSingleNamedField fieldsInstalledPackageInfo
 showSimpleInstalledPackageInfoField :: String -> Maybe (InstalledPackageInfo -> String)
 showSimpleInstalledPackageInfoField = showSimpleSingleNamedField fieldsInstalledPackageInfo
 
+dispCompatPackageKey :: String -> Doc
+dispCompatPackageKey = text
+
+parseCompatPackageKey :: Parse.ReadP r String
+parseCompatPackageKey = Parse.munch1 uid_char
+    where uid_char c = Char.isAlphaNum c || c `elem` "-_.=[],:<>+"
+
 -- -----------------------------------------------------------------------------
 -- Description of the fields, for parsing/printing
 
@@ -250,9 +260,11 @@ basicFieldDescrs =
  , simpleField "id"
                            disp                   parse
                            installedUnitId             (\pk pkg -> pkg{installedUnitId=pk})
- -- NB: parse these as component IDs
+ , simpleField "instantiated-with"
+        (dispModSubst . Map.fromList)    (fmap Map.toList parseModSubst)
+        instantiatedWith   (\iw    pkg -> pkg{instantiatedWith=iw})
  , simpleField "key"
-                           (disp . ComponentId)   (fmap (\(ComponentId s) -> s) parse)
+                           dispCompatPackageKey   parseCompatPackageKey
                            compatPackageKey       (\pk pkg -> pkg{compatPackageKey=pk})
  , simpleField "license"
                            disp                   parseLicenseQ

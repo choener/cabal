@@ -8,6 +8,7 @@ module Distribution.Types.ComponentLocalBuildInfo (
 
 import Prelude ()
 import Distribution.Compat.Prelude
+import Distribution.ModuleName
 
 import Distribution.Compat.Graph
 import Distribution.Types.ComponentName
@@ -27,8 +28,10 @@ data ComponentLocalBuildInfo
     -- identify the ComponentLocalBuildInfo.
     componentLocalName :: ComponentName,
     -- | The computed 'UnitId' which uniquely identifies this
-    -- component.
+    -- component.  Might be hashed.
     componentUnitId :: UnitId,
+    -- | How the component was instantiated
+    componentInstantiatedWith :: [(ModuleName, Module)],
     -- | Resolved internal and external package dependencies for this component.
     -- The 'BuildInfo' specifies a set of build dependencies that must be
     -- satisfied in terms of version ranges. This field fixes those dependencies
@@ -93,5 +96,4 @@ instance IsNode ComponentLocalBuildInfo where
     nodeNeighbors = componentInternalDeps
 
 componentComponentId :: ComponentLocalBuildInfo -> ComponentId
-componentComponentId clbi = case componentUnitId clbi of
-                                SimpleUnitId cid -> cid
+componentComponentId clbi = unitIdComponentId (componentUnitId clbi)
