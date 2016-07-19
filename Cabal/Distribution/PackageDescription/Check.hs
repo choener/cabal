@@ -233,7 +233,8 @@ checkLibrary pkg lib =
             "Duplicate modules in library: "
          ++ commaSep (map display moduleDuplicates)
 
-  , check (null (libModules lib) && null (reexportedModules lib)) $
+  -- TODO: This check is bogus if a required-signature was passed through
+  , check (null (explicitLibModules lib) && null (reexportedModules lib)) $
       PackageDistSuspiciousWarn $
            "Library " ++ (case libName lib of
                             Nothing -> ""
@@ -261,7 +262,8 @@ checkLibrary pkg lib =
       | specVersion pkg >= Version ver []      = Nothing
       | otherwise                              = check cond pc
 
-    moduleDuplicates = dups (libModules lib ++
+    -- TODO: not sure if this check is always right in Backpack
+    moduleDuplicates = dups (explicitLibModules lib ++
                              map moduleReexportName (reexportedModules lib))
 
 checkExecutable :: PackageDescription -> Executable -> [PackageCheck]
