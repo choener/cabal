@@ -1,6 +1,9 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveFunctor #-}
--- This module was copied from cabal-install.
+-- Note: This module was copied from cabal-install.
+
+-- | A progress monad, which we use to report failure and logging from
+-- otherwise pure code.
 module Distribution.Utils.Progress
     ( Progress
     , stepProgress

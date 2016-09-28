@@ -1,8 +1,11 @@
 {-# LANGUAGE NondecreasingIndentation #-}
--- | A simple union-find data structure, based off of the implementation
--- in "The Essence of ML Type Inference".
+-- | A simple mutable union-find data structure.
 --
--- (N.B. the union-find package is also based off of this.)
+-- It is used in a unification algorithm for backpack mix-in linking.
+--
+-- This implementation is based off of the one in \"The Essence of ML Type
+-- Inference\". (N.B. the union-find package is also based off of this.)
+--
 module Distribution.Utils.UnionFind (
     Point,
     fresh,

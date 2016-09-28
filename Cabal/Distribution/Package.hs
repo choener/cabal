@@ -158,8 +158,11 @@ instance NFData PackageIdentifier where
 --
 -- In GHC, this is just a 'Module' constructor for backwards
 -- compatibility reasons, but in Cabal we can do it properly.
-data Module
-    = Module UnitId ModuleName
+data Module =
+      -- | A \"normal\" concrete module that is defined in a specific package.
+      Module UnitId ModuleName
+
+      -- | A module variable, standing for a module that needs to be filled in.
     | ModuleVar ModuleName
     deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
 
@@ -188,8 +191,11 @@ instance NFData Module where
     rnf (ModuleVar mod_name) = rnf mod_name
 
 -- | A 'ComponentId' uniquely identifies the transitive source
--- code closure of a component.  For non-Backpack components, it also
--- serves as the basis for install paths, symbols, etc.
+-- code closure of a component (i.e. libraries, executables).
+--
+-- For non-Backpack components, this corresponds one to one with
+-- the 'UnitId', which serves as the basis for install paths,
+-- linker symbols, etc.
 --
 data ComponentId
     = ComponentId String
@@ -254,19 +260,72 @@ parseModSubstEntry =
        v <- parse
        return (k, v)
 
--- | A unit identifier uniquely identifies a library (e.g.,
--- a package) in GHC.  In the absence of Backpack, unit identifiers
--- are just strings ('SimpleUnitId'); however, if a library is
--- parametrized over some signatures, these identifiers need
--- more structure.  For more details, see:
---  https://github.com/ezyang/ghc-proposals/blob/backpack/proposals/0000-backpack.rst
-data UnitId = SimpleUnitId ComponentId
-            -- ^ Equivalent to @'UnitId' cid Map.empty@
-            | HashedUnitId ComponentId String
-            -- ^ A unit identifier where the substitution is hashed
-            | UnitId ComponentId ModuleSubst
-            | UnitIdVar !Int -- de Bruijn indexed
-    deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
+-- | A unit is a specific incarnation of a component (library or executable),
+-- and a unit identifier uniquely identifies a unit.
+--
+-- In the /absence of Backpack/ units and components are exactly the same and
+-- a 'UnitId' is the same as a 'ComponentId'.
+--
+-- For a source component using Backpack however there is more structure as
+-- components may be parametrized over some signatures, and these \"holes\"
+-- may be partially or wholly filled.
+--
+-- So a unit is a component plus the additional information on how the holes
+-- are filled in. Thus there is a one to many relationship: for a particular
+-- component there are many different ways of filling in the holes, and each
+-- different combination is a unit (and has a separate 'UnitId').
+--
+-- For more details see the Backpack spec
+-- <https://github.com/ezyang/ghc-proposals/blob/backpack/proposals/0000-backpack.rst>
+--
+-- The 'UnitId' is used to refer to units throughout the various stages of
+-- defining, composing, compiling and installing. The 'UnitId' is the primary
+-- key for installed package databases (i.e. @ghc-pkg@ and friends). But note
+-- that not all forms of units can exist in an installed state. In particular
+-- only units that have /none/ or /all/ of their holes filled in can be
+-- installed, (and only those with all their holes filled are installed with
+-- object code).
+--
+data UnitId =
+
+     -- | A \"normal\" non-Backpack component.
+     --
+     -- In the Backpack view of the world, this is a special case of the more
+     -- general 'UnitId', equivalent to @'UnitId' cid Map.empty@.
+     --
+     SimpleUnitId ComponentId
+
+     -- | A Backpack component in a form that can exist in an installed state.
+     -- This is either with all holes filled or none.
+     --
+     -- An installed unit with all holes unfilled only contains interface or
+     -- \"signature\" information, while a unit with all holes filled can be
+     -- compiled to object code and installed.
+     --
+     -- The extra string is a hash of the 'ModuleSubst' which describes the
+     -- holes and if and how they are filled in.
+     --
+   | HashedUnitId ComponentId String
+
+     -- | A Backpack component plus the description of the holes and if and
+     -- how they are filled in.
+     --
+     -- The 'ModuleSubst' is kept in a structured form that allows further
+     -- transformation (such as filling in more holes).
+     --
+     -- This form of unit cannot be installed. It must first be converted to
+     -- a 'HashedUnitId'.
+     --
+   | UnitId ComponentId ModuleSubst
+
+     -- | A form of unit identifier used during intermediate stages of
+     -- definition and composition.
+     --
+     -- This form of unit cannot be installed. It must first be converted to
+     -- a 'HashedUnitId'.
+     --
+   | UnitIdVar !Int -- de Bruijn indexed
+  deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
 
 -- | Hash a unit identifier into a string suitable for use
 -- on a file system.
